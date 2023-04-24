@@ -1,0 +1,190 @@
+# Load a file into a dataframe
+df = spark.read.load('/data/mydata.csv', format='csv', header=True)
+
+# Save the dataframe as a delta table
+delta_table_path = "/delta/mydata"
+df.write.format("delta").save(delta_table_path)
+
+
+#You can replace an existing Delta Lake table with the contents of a dataframe by using the overwrite mode, as shown here
+new_df.write.format("delta").mode("overwrite").save(delta_table_path)
+
+#You can also add rows from a dataframe to an existing table by using the append mode
+new_rows_df.write.format("delta").mode("append").save(delta_table_path)
+
+#Making conditional updates. For example, you could use the following code to update the price column for all rows with a category column value of "Accessories"
+from delta.tables import *
+from pyspark.sql.functions import *
+
+# Create a deltaTable object
+deltaTable = DeltaTable.forPath(spark, delta_table_path)
+
+# Update the table (reduce price of accessories by 10%)
+deltaTable.update(
+    condition = "Category == 'Accessories'",
+    set = { "Price": "Price * 0.9" })
+    
+#You can retrieve data from a specific version of a Delta Lake table by reading the data from the delta table location into a dataframe, specifying the version required as a versionAsOf option
+df = spark.read.format("delta").option("versionAsOf", 0).load(delta_table_path)
+
+#Alternatively, you can specify a timestamp by using the timestampAsOf option
+df = spark.read.format("delta").option("timestampAsOf", '2022-01-01').load(delta_table_path)
+
+#Creating catalog files
+#You can create managed tables by writing a dataframe using the saveAsTable operation as shown in the following examples
+# Save a dataframe as a managed table
+df.write.format("delta").saveAsTable("MyManagedTable")
+
+## specify a path option to save as an external table
+df.write.format("delta").option("path", "/mydata").saveAsTable("MyExternalTable")
+
+#You can also create a catalog table by using the CREATE TABLE SQL statement with the USING DELTA clause, and an optional LOCATION parameter for external tables
+spark.sql("CREATE TABLE MyExternalTable USING DELTA LOCATION '/mydata'")
+
+#Alternatively you can use the native SQL support in Spark to run the statement
+%%sql
+
+CREATE TABLE MyExternalTable
+USING DELTA
+LOCATION '/mydata'
+
+#when creating a new managed table, or an external table with a currently empty location, you define the table schema by specifying the column names, types, and nullability as part of the CREATE TABLE statement; as shown in the following example
+%%sql
+
+CREATE TABLE ManagedSalesOrders
+(
+    Orderid INT NOT NULL,
+    OrderDate TIMESTAMP NOT NULL,
+    CustomerName STRING,
+    SalesTotal FLOAT NOT NULL
+)
+USING DELTA
+
+#You can use the DeltaTableBuilder API (part of the Delta Lake API) to create a catalog table, as shown in the following example:
+from delta.tables import *
+
+DeltaTable.create(spark) \
+  .tableName("default.ManagedProducts") \
+  .addColumn("Productid", "INT") \
+  .addColumn("ProductName", "STRING") \
+  .addColumn("Category", "STRING") \
+  .addColumn("Price", "FLOAT") \
+  .execute()
+  
+  
+#You can use catalog tables like tables in any SQL-based relational database, querying and manipulating them by using standard SQL statements
+ 
+ %%sql
+
+SELECT orderid, salestotal
+FROM ManagedSalesOrders
+
+#In the following PySpark example, a Delta Lake table is used to store details of Internet sales orders. 
+#A stream is created that reads data from the Delta Lake table folder as new data is appended.
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+
+# Load a streaming dataframe from the Delta Table
+stream_df = spark.readStream.format("delta") \
+    .option("ignoreChanges", "true") \
+    .load("/delta/internetorders")
+
+# Now you can process the streaming data in the dataframe
+# for example, show it:
+stream_df.show()
+
+#Note: When using a Delta Lake table as a streaming source, only append operations can be included in the stream. 
+#Data modifications will cause an error unless you specify the ignoreChanges or ignoreDeletes option
+
+#In the following PySpark example, a stream of data is read from JSON files in a folder
+#The JSON data in each file contains the status for an IoT device in the format {"device":"Dev1","status":"ok"}
+#New data is added to the stream whenever a file is added to the folder
+#The input stream is a boundless dataframe, which is then written in delta format to a folder location for a Delta Lake table
+
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+
+# Create a stream that reads JSON data from a folder
+inputPath = '/streamingdata/'
+jsonSchema = StructType([
+    StructField("device", StringType(), False),
+    StructField("status", StringType(), False)
+])
+stream_df = spark.readStream.schema(jsonSchema).option("maxFilesPerTrigger", 1).json(inputPath)
+
+# Write the stream to a delta table
+table_path = '/delta/devicetable'
+checkpoint_path = '/delta/checkpoint'
+delta_stream = stream_df.writeStream.format("delta").option("checkpointLocation", checkpoint_path).start(table_path)
+
+#Note: The checkpointLocation option is used to write a checkpoint file that tracks the state of the stream processing. This file enables you to recover from failure at the point where stream processing left off
+
+#After the streaming process has started, you can query the Delta Lake table to which the streaming output is being written to see the latest data. 
+#For example, the following code creates a catalog table for the Delta Lake table folder and queries it
+
+%%sql
+
+CREATE TABLE DeviceTable
+USING DELTA
+LOCATION '/delta/devicetable';
+
+SELECT device, status
+FROM DeviceTable;
+
+#To stop the stream of data being written to the Delta Lake table, you can use the stop method of the streaming query
+delta_stream.stop()
+
+#Querying delta formatted files with OPENROWSET
+#In the following example, a SQL SELECT query reads delta format data using the OPENROWSET function.
+
+SELECT *
+FROM
+    OPENROWSET(
+        BULK 'https://mystore.dfs.core.windows.net/files/delta/mytable/',
+        FORMAT = 'DELTA'
+    ) AS deltadata
+    
+ #You could run this query in a serverless SQL pool to retrieve the latest data from the Delta Lake table stored in the specified file location
+ #You could also create a database and add a data source that encapsulates the location of your Delta Lake data files, as shown in this example:
+ CREATE DATABASE MyDB
+      COLLATE Latin1_General_100_BIN2_UTF8;
+GO;
+
+USE MyDB;
+GO
+
+CREATE EXTERNAL DATA SOURCE DeltaLakeStore
+WITH
+(
+    LOCATION = 'https://mystore.dfs.core.windows.net/files/delta/'
+);
+GO
+
+SELECT TOP 10 *
+FROM OPENROWSET(
+        BULK 'mytable',
+        DATA_SOURCE = 'DeltaLakeStore',
+        FORMAT = 'DELTA'
+    ) as deltadata;
+    
+ #Note: When working with Delta Lake data, which is stored in Parquet format, it's generally best to create a database with a UTF-8 based collation in order to ensure string compatibility.
+ 
+ #Querying catalog tables
+ The serverless SQL pool in Azure Synapse Analytics has shared access to databases in the Spark metastore, so you can query catalog tables that were created using Spark SQL
+ #In the following example, a SQL query in a serverless SQL pool queries a catalog table that contains Delta Lake data:
+ -- By default, Spark catalog tables are created in a database named "default"
+-- If you created another database using Spark SQL, you can use it here
+USE default;
+
+SELECT * FROM MyDeltaTable;
+
+
+
+
+
+
+
+
+
+
+ 
